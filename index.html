@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 멀티플레이어 게임</title>
+
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: Arial, sans-serif;
+            user-select: none; /* 드래그 시 텍스트 선택 방지 */
+        }
+
+        #game-canvas {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+
+        #auth-ui {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            z-index: 10;
+        }
+
+        .form-container {
+            display: flex;
+            flex-direction: column;
+            width: 300px;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .form-container label {
+            font-size: 14px;
+            color: #ccc;
+            margin-bottom: -5px;
+        }
+
+        .form-container input {
+            padding: 10px;
+            font-size: 15px;
+            border: none;
+            border-radius: 5px;
+            outline: none;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            width: 300px;
+        }
+
+        .button-group button {
+            flex: 1;
+            padding: 10px;
+            font-size: 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            color: white;
+        }
+
+        #btn-login { background-color: #4CAF50; }
+        #btn-signup { background-color: #008CBA; }
+
+        .button-group button:hover { opacity: 0.9; }
+
+        #player-count-info {
+            margin-top: 15px;
+            font-size: 14px;
+            color: #ffca28;
+        }
+
+        /* 사망 및 리스폰 알림 UI */
+        #death-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(255, 0, 0, 0.85);
+            color: white;
+            padding: 20px 40px;
+            font-size: 24px;
+            font-weight: bold;
+            border-radius: 10px;
+            display: none;
+            z-index: 20;
+            text-align: center;
+            box-shadow: 0 0 15px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="game-canvas"></canvas>
+
+    <!-- 사망 메시지 안내 레이어 -->
+    <div id="death-overlay">⚠️ 낙사하였습니다!<br/><span style="font-size: 16px;">2초 후 시작 위치로 리스폰합니다.</span></div>
+
+    <!-- 로그인/회원가입 UI -->
+    <div id="auth-ui">
+        <h2>3D 멀티플레이어 게임</h2>
+        <div class="form-container">
+            <label for="email-input">이메일 계정</label>
+            <input type="email" id="email-input" placeholder="이메일을 입력하세요" />
+            
+            <label for="password-input">비밀번호</label>
+            <input type="password" id="password-input" placeholder="비밀번호를 입력하세요" />
+        </div>
+        <div class="button-group">
+            <button id="btn-login">로그인</button>
+            <button id="btn-signup">회원가입</button>
+        </div>
+        <div id="player-count-info">접속 가능 인원: 최대 15명</div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
+                "firebase/analytics": "https://www.gstatic.com/firebasejs/10.7.1/firebase-analytics.js",
+                "firebase/auth": "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js",
+                "firebase/database": "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { initializeApp } from 'firebase/app';
+        import { getAnalytics } from 'firebase/analytics';
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
+        import { getDatabase, ref, set, get, onValue, onDisconnect } from 'firebase/database';
+
+        // -----------------------------------------------------------------
+        // [1] Firebase 설정
+        // -----------------------------------------------------------------
+        const firebaseConfig = {
+            apiKey: "AIzaSyA43YtthQrg36fkVlkbKnZHv98wm61iIf8",
+            authDomain: "testgame-650ae.firebaseapp.com",
+            databaseURL: "https://testgame-650ae-default-rtdb.firebaseio.com",
+            projectId: "testgame-650ae",
+            storageBucket: "testgame-650ae.firebasestorage.app",
+            messagingSenderId: "1082222034915",
+            appId: "1:1082222034915:web:8d847237286c8951cfaad6",
+            measurementId: "G-CBQ220MB32"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const analytics = getAnalytics(app);
+        const auth = getAuth(app);
+        const db = getDatabase(app);
+
+        // -----------------------------------------------------------------
+        // [2] 전역 변수 설정
+        // -----------------------------------------------------------------
+        let scene, camera, renderer;
+        let myPlayerId = null;
+        let localPlayerMesh = null;
+        const MAX_PLAYERS = 15;
+        const otherPlayers = {};
+        const keyboardKeys = {};
+        const moveSpeed = 0.15;
+
+        // 물리 및 점프 변수
+        let velocityY = 0;
+        const gravity = -0.012;
+        const jumpPower = 0.28;
+        let isGrounded = true;
+        let isDying = false; 
+        const MAP_SIZE = 50; // 격자 필드 크기 (50x50)
+        const PLAYER_SIZE = { x: 1.0, y: 1.8, z: 1.0 }; // 플레이어 상자 크기
+
+        // 마우스 우클릭 시점 회전 관련 변수
+        let isRightMouseDown = false;
+        let cameraAngleY = 0; // 좌우 회전각
+        let cameraAngleX = 0.3; // 상하 회전각 (기본적으로 약간 위에서 내려다보는각)
+        const cameraDistance = 12; // 플레이어와 카메라 간 거리
+
+        // -----------------------------------------------------------------
+        // [3] Three.js 초기화
+        // -----------------------------------------------------------------
+        function initThreeJS() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('game-canvas'), antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(10, 20, 10);
+            scene.add(directionalLight);
+
+            // 격자무늬 필드 생성 (50 x 50)
+            const gridHelper = new THREE.GridHelper(MAP_SIZE, 50);
+            scene.add(gridHelper);
+
+            // 우클릭 기본 메뉴(컨텍스트 메뉴) 방지
+            window.addEventListener('contextmenu', (e) => e.preventDefault());
+
+            // 마우스 이벤트 (우클릭 회전)
+            window.addEventListener('mousedown', (e) => {
+                if (e.button === 2) isRightMouseDown = true;
+            });
+            window.addEventListener('mouseup', (e) => {
+                if (e.button === 2) isRightMouseDown = false;
+            });
+            window.addEventListener('mousemove', (e) => {
+                if (!isRightMouseDown) return;
+
+                // 마우스 이동량에 따른 시점 회전각 변경
+                cameraAngleY -= e.movementX * 0.005;
+                cameraAngleX += e.movementY * 0.005;
+
+                // 세로 시점각 제한 (바닥 아래나 수직 초과 방지)
+                cameraAngleX = Math.max(-Math.PI / 4, Math.min(Math.PI / 3, cameraAngleX));
+            });
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // -----------------------------------------------------------------
+        // [4] 기본 상자 캐릭터 생성 (GLB 로드 제거)
+        // -----------------------------------------------------------------
+        function createPlayerMesh(isLocal = false) {
+            const group = new THREE.Group();
+            const geometry = new THREE.BoxGeometry(PLAYER_SIZE.x, PLAYER_SIZE.y, PLAYER_SIZE.z);
+            // 내 캐릭터는 초록색, 다른 캐릭터는 빨간색
+            const material = new THREE.MeshStandardMaterial({ color: isLocal ? 0x00ff00 : 0xff0000 });
+            const cubeMesh = new THREE.Mesh(geometry, material);
+            
+            // 피벗을 발바닥에 맞추기 위해 Y축 위치 조정
+            cubeMesh.position.y = PLAYER_SIZE.y / 2;
+            group.add(cubeMesh);
+
+            scene.add(group);
+            return group;
+        }
+
+        // -----------------------------------------------------------------
+        // [5] 로그인 / 회원가입
+        // -----------------------------------------------------------------
+        document.getElementById('btn-signup').addEventListener('click', () => {
+            const email = document.getElementById('email-input').value.trim();
+            const password = document.getElementById('password-input').value.trim();
+
+            if (!email || !password) {
+                alert('이메일과 비밀번호를 모두 입력해 주세요.');
+                return;
+            }
+
+            createUserWithEmailAndPassword(auth, email, password)
+                .then(() => alert('회원가입이 완료되었습니다! 로그인해 주세요.'))
+                .catch((error) => alert('회원가입 실패: ' + error.message));
+        });
+
+        document.getElementById('btn-login').addEventListener('click', async () => {
+            const email = document.getElementById('email-input').value.trim();
+            const password = document.getElementById('password-input').value.trim();
+
+            if (!email || !password) {
+                alert('이메일과 비밀번호를 모두 입력해 주세요.');
+                return;
+            }
+
+            try {
+                const playersRef = ref(db, 'players');
+                const snapshot = await get(playersRef);
+                const currentPlayersData = snapshot.val() || {};
+                
+                if (Object.keys(currentPlayersData).length >= MAX_PLAYERS) {
+                    alert(`서버 접속 인원이 초과되었습니다. (최대 ${MAX_PLAYERS}명)`);
+                    return;
+                }
+
+                const userCredential = await signInWithEmailAndPassword(auth, email, password);
+                myPlayerId = userCredential.user.uid;
+                startGame();
+
+            } catch (error) {
+                alert('로그인 실패: ' + error.message);
+            }
+        });
+
+        // -----------------------------------------------------------------
+        // [6] 게임 실행 및 네트워크
+        // -----------------------------------------------------------------
+        function startGame() {
+            document.getElementById('auth-ui').style.display = 'none';
+            localPlayerMesh = createPlayerMesh(true);
+
+            window.addEventListener('keydown', (e) => keyboardKeys[e.code] = true);
+            window.addEventListener('keyup', (e) => keyboardKeys[e.code] = false);
+
+            const myPlayerRef = ref(db, 'players/' + myPlayerId);
+            onDisconnect(myPlayerRef).remove();
+
+            set(myPlayerRef, {
+                x: 0,
+                y: 0,
+                z: 0,
+                rotationY: 0
+            });
+
+            onValue(ref(db, 'players'), (snapshot) => {
+                updateOtherPlayers(snapshot.val() || {});
+            });
+
+            animate();
+        }
+
+        function updateOtherPlayers(playersData) {
+            for (let id in playersData) {
+                if (id === myPlayerId) continue;
+                const pData = playersData[id];
+
+                if (!otherPlayers[id]) {
+                    otherPlayers[id] = createPlayerMesh(false);
+                }
+
+                otherPlayers[id].position.set(pData.x, pData.y, pData.z);
+                otherPlayers[id].rotation.y = pData.rotationY;
+            }
+
+            for (let id in otherPlayers) {
+                if (!playersData[id]) {
+                    scene.remove(otherPlayers[id]);
+                    delete otherPlayers[id];
+                }
+            }
+        }
+
+        // 바운딩 박스 생성
+        function getPlayerBoundingBox(position) {
+            return new THREE.Box3(
+                new THREE.Vector3(position.x - PLAYER_SIZE.x / 2, position.y, position.z - PLAYER_SIZE.z / 2),
+                new THREE.Vector3(position.x + PLAYER_SIZE.x / 2, position.y + PLAYER_SIZE.y, position.z + PLAYER_SIZE.z / 2)
+            );
+        }
+
+        // -----------------------------------------------------------------
+        // [7] 사망 및 리스폰
+        // -----------------------------------------------------------------
+        function respawnPlayer() {
+            isDying = true;
+            document.getElementById('death-overlay').style.display = 'block';
+
+            setTimeout(() => {
+                localPlayerMesh.position.set(0, 0, 0);
+                velocityY = 0;
+                isGrounded = true;
+                isDying = false;
+                document.getElementById('death-overlay').style.display = 'none';
+
+                set(ref(db, 'players/' + myPlayerId), {
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    rotationY: 0
+                });
+            }, 2000);
+        }
+
+        // -----------------------------------------------------------------
+        // [8] 이동, 물리 및 시점 처리
+        // -----------------------------------------------------------------
+        function handleLocalPlayerMovement() {
+            if (!localPlayerMesh || isDying) return;
+
+            let moved = false;
+            const nextPosition = localPlayerMesh.position.clone();
+
+            let moveX = 0;
+            let moveZ = 0;
+
+            // 키보드 입력
+            if (keyboardKeys['KeyW'] || keyboardKeys['ArrowUp']) { moveZ -= moveSpeed; moved = true; }
+            if (keyboardKeys['KeyS'] || keyboardKeys['ArrowDown']) { moveZ += moveSpeed; moved = true; }
+            if (keyboardKeys['KeyA'] || keyboardKeys['ArrowLeft']) { moveX -= moveSpeed; moved = true; }
+            if (keyboardKeys['KeyD'] || keyboardKeys['ArrowRight']) { moveX += moveSpeed; moved = true; }
+
+            // 회전각 적용
+            if (moved) {
+                localPlayerMesh.rotation.y = Math.atan2(moveX, moveZ);
+            }
+
+            // 점프
+            if (keyboardKeys['Space'] && isGrounded) {
+                velocityY = jumpPower;
+                isGrounded = false;
+                moved = true;
+            }
+
+            // 중력 적용
+            velocityY += gravity;
+            nextPosition.y += velocityY;
+
+            // X축 이동 및 충돌
+            nextPosition.x += moveX;
+            let testBoxX = getPlayerBoundingBox(nextPosition);
+            for (let id in otherPlayers) {
+                let otherBox = getPlayerBoundingBox(otherPlayers[id].position);
+                if (testBoxX.intersectsBox(otherBox) && localPlayerMesh.position.y < otherPlayers[id].position.y + PLAYER_SIZE.y - 0.2) {
+                    nextPosition.x -= moveX;
+                    break;
+                }
+            }
+
+            // Z축 이동 및 충돌
+            nextPosition.z += moveZ;
+            let testBoxZ = getPlayerBoundingBox(nextPosition);
+            for (let id in otherPlayers) {
+                let otherBox = getPlayerBoundingBox(otherPlayers[id].position);
+                if (testBoxZ.intersectsBox(otherBox) && localPlayerMesh.position.y < otherPlayers[id].position.y + PLAYER_SIZE.y - 0.2) {
+                    nextPosition.z -= moveZ;
+                    break;
+                }
+            }
+
+            // Y축(착지 및 필드 영역) 검사
+            isGrounded = false;
+
+            // 격자 필드 내부 판정 (크기 50x50 범위: -25 ~ 25)
+            const halfMap = MAP_SIZE / 2;
+            const isInsideMap = (Math.abs(nextPosition.x) < halfMap) && (Math.abs(nextPosition.z) < halfMap);
+
+            // 맵 안에서 Y<=0 에 도달한 경우 착지
+            if (isInsideMap && nextPosition.y <= 0) {
+                nextPosition.y = 0;
+                velocityY = 0;
+                isGrounded = true;
+            } else {
+                // 머리 위 탑 쌓기 판정
+                let testBoxY = getPlayerBoundingBox(nextPosition);
+                for (let id in otherPlayers) {
+                    let otherPos = otherPlayers[id].position;
+                    let otherBox = getPlayerBoundingBox(otherPos);
+
+                    if (testBoxY.intersectsBox(otherBox)) {
+                        if (localPlayerMesh.position.y >= otherPos.y + PLAYER_SIZE.y - 0.3 && velocityY <= 0) {
+                            nextPosition.y = otherPos.y + PLAYER_SIZE.y;
+                            velocityY = 0;
+                            isGrounded = true; // 머리 위를 새로운 착지면으로 인식
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 맵 밖으로 떨어져 추락 사망 판정
+            if (nextPosition.y < -15 && !isDying) {
+                respawnPlayer();
+                return;
+            }
+
+            // 캐릭터 위치 적용
+            localPlayerMesh.position.copy(nextPosition);
+
+            // -------------------------------------------------------------
+            // 마우스 우클릭 카메라 시점 계산 및 추적
+            // -------------------------------------------------------------
+            const camX = localPlayerMesh.position.x + cameraDistance * Math.sin(cameraAngleY) * Math.cos(cameraAngleX);
+            const camY = localPlayerMesh.position.y + 1.5 + cameraDistance * Math.sin(cameraAngleX);
+            const camZ = localPlayerMesh.position.z + cameraDistance * Math.cos(cameraAngleY) * Math.cos(cameraAngleX);
+
+            camera.position.set(camX, camY, camZ);
+            camera.lookAt(localPlayerMesh.position.x, localPlayerMesh.position.y + 1, localPlayerMesh.position.z);
+
+            // DB 위치 동기화
+            if ((moved || !isGrounded || velocityY !== 0) && myPlayerId) {
+                set(ref(db, 'players/' + myPlayerId), {
+                    x: localPlayerMesh.position.x,
+                    y: localPlayerMesh.position.y,
+                    z: localPlayerMesh.position.z,
+                    rotationY: localPlayerMesh.rotation.y
+                });
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // [9] 프레임 애니메이션 루프
+        // -----------------------------------------------------------------
+        function animate() {
+            requestAnimationFrame(animate);
+            handleLocalPlayerMovement();
+            renderer.render(scene, camera);
+        }
+
+        initThreeJS();
+    </script>
+</body>
+</html>
